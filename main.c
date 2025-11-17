@@ -30,7 +30,9 @@ int first_primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29,
 typedef struct
 {
     mpz_t n, e, d;
-
+    mpz_t p, q;
+    mpz_t dp, dq; // dp = d mod (p - 1)
+    mpz_t qinv;
 } rsa_context;
 
 typedef struct
@@ -81,6 +83,28 @@ void bbs_init(bbs_state *bbs, size_t bits)
     gmp_randclear(rs);
 }
 
+static void rsa_key_init(rsa_context *k)
+{
+    mpz_inits(k->n, k->e, k->d, k->p, k->q, k->dp, k->dq, k->qinv, NULL);
+}
+
+static void rsa_key_clear(rsa_context *k)
+{
+    mpz_clears(k->n, k->e, k->d, k->p, k->q, k->dp, k->dq, k->qinv, NULL);
+}
+
+void rsa_crt_init(rsa_context *rsa)
+{
+    mpz_t p1, q1;
+    mpz_inits(p1, q1, NULL);
+    mpz_sub_ui(p1, rsa->p, 1);
+    mpz_sub_ui(q1, rsa->q, 1);
+    mpz_mod(rsa->dp, rsa->d, p1);
+    mpz_mod(rsa->dq, rsa->d, q1);
+    mpz_invert(rsa->qinv, rsa->q, rsa->p);
+    mpz_clears(p1, q1, NULL);
+}
+
 void bbs_clear(bbs_state *bbs)
 {
     mpz_clears(bbs->n, bbs->x, NULL);
@@ -115,7 +139,7 @@ int nist_freq_monobit(const uint8_t *bits, size_t n)
         sum += (bits[i] == 1) ? 1 : -1;
     }
 
-    double s_obs = fabs((double)sum) / sqrt((double)n);
+    double s_obs   = fabs((double)sum) / sqrt((double)n);
     double p_value = erfc(s_obs) / M_SQRT2;
 
     printf("Frequency (Monobit) Test:\n");
@@ -162,8 +186,8 @@ int nist_runs(const uint8_t *bits, size_t n)
     }
     printf("  Vn      = %zu\n", Vn);
 
-    double num = fabs((double)Vn - 2.0 * n * pi * (1.0 - pi));
-    double den = 2.0 * sqrt(2.0 * n) * pi * (1.0 - pi);
+    double num     = fabs((double)Vn - 2.0 * n * pi * (1.0 - pi));
+    double den     = 2.0 * sqrt(2.0 * n) * pi * (1.0 - pi);
     double p_value = erfc(num / den);
 
     printf("  p-value = %g\n", p_value);
@@ -236,17 +260,17 @@ int nist_maurer_universal(const uint8_t *bits, size_t n)
     for (size_t i = 1; i <= Q; i++)
     {
         int idx = BLOCK_TO_INT(pos);
-        T[idx] = (int)i;
+        T[idx]  = (int)i;
         pos += (size_t)L;
     }
 
     double sum = 0.0;
     for (size_t i = Q + 1; i <= Q + K; i++)
     {
-        int idx = BLOCK_TO_INT(pos);
-        int last = T[idx];
+        int idx      = BLOCK_TO_INT(pos);
+        int last     = T[idx];
         int distance = (int)i - last; // last must be > 0 because Q >> table_size-ish
-        T[idx] = (int)i;
+        T[idx]       = (int)i;
         sum += log2((double)distance);
         pos += (size_t)L;
     }
@@ -305,8 +329,8 @@ int nist_maurer_universal(const uint8_t *bits, size_t n)
         default: expected = 7; variance = 3;
     }
 
-    double c = 0.7 - (0.8 / L) + ((4.0 + 32.0 / L) * pow(K, -3.0 / (double)L) / 15.0);
-    double sigma = c * sqrt(variance / (double)K);
+    double c       = 0.7 - (0.8 / L) + ((4.0 + 32.0 / L) * pow(K, -3.0 / (double)L) / 15.0);
+    double sigma   = c * sqrt(variance / (double)K);
     double p_value = erfc(fabs(fn - expected) / (sqrt(2.0) * sigma));
 
     printf("\nMaurer’s Universal Statistical Test:\n");
@@ -402,7 +426,7 @@ int low_level_primality(mpz_t n)
 
 void bbs_generate_prime(bbs_state *bbs, mpz_t n, size_t bits)
 {
-    int      attempt = 0;
+    int      attempt   = 0;
     uint8_t *bitstream = malloc(bits);
     if (!bitstream)
     {
@@ -438,46 +462,46 @@ void bbs_generate_prime(bbs_state *bbs, mpz_t n, size_t bits)
     gmp_printf("Found prime after %d attempts\n", attempt);
 }
 
-int rsa_key_gen(mpz_t e, mpz_t d, mpz_t n, size_t bits)
+int rsa_key_gen(rsa_context *rsa, size_t bits)
 {
     bbs_state bbs;
     bbs_init(&bbs, bits);
 
-    mpz_t p, q, phi, gcd;
-    mpz_inits(p, q, phi, gcd, NULL);
+    mpz_t phi, gcd;
+    mpz_inits(phi, gcd, NULL);
 
-    bbs_generate_prime(&bbs, p, bits / 2);
-    bbs_generate_prime(&bbs, q, bits / 2);
+    bbs_generate_prime(&bbs, rsa->p, bits / 2);
+    bbs_generate_prime(&bbs, rsa->q, bits / 2);
 
-    mpz_mul(n, p, q);
+    mpz_mul(rsa->n, rsa->p, rsa->q);
 
     mpz_t p1, q1;
     mpz_inits(p1, q1, NULL);
-    mpz_sub_ui(p1, p, 1);
-    mpz_sub_ui(q1, q, 1);
+    mpz_sub_ui(p1, rsa->p, 1);
+    mpz_sub_ui(q1, rsa->q, 1);
     mpz_mul(phi, p1, q1);
     mpz_clears(p1, q1, NULL);
 
-    mpz_set_ui(e, 65537);
+    mpz_set_ui(rsa->e, 65537);
 
-    mpz_gcd(gcd, e, phi);
+    mpz_gcd(gcd, rsa->e, phi);
 
     if (mpz_cmp_ui(gcd, 1) != 0)
         return -1;
 
-    mpz_invert(d, e, phi);
+    mpz_invert(rsa->d, rsa->e, phi);
 
     printf("RSA key generated:\n");
-    gmp_printf("p = %Zd\n\nq = %Zd\n\nn = %Zd\n\ne = %Zd\n\nd = %Zd\n\n", p, q, n, e, d);
+    gmp_printf("p = %Zd\n\nq = %Zd\n\nn = %Zd\n\ne = %Zd\n\nd = %Zd\n\n", rsa->p, rsa->q, rsa->n, rsa->e, rsa->d);
 
-    mpz_clears(p, q, phi, gcd, NULL);
+    mpz_clears(phi, gcd, NULL);
 
     return 0;
 }
 
 void bbs_generate_aes_key_256(bbs_state *bbs, uint8_t *key, size_t key_len)
 {
-    size_t   n = key_len * 8;
+    size_t   n    = key_len * 8;
     uint8_t *bits = malloc(n);
     if (!bits)
     {
@@ -509,7 +533,7 @@ int aes_encrypt_cbc(const uint8_t *key, const uint8_t *iv,
     if (!ctx)
         return 0;
 
-    int len = 0;
+    int len     = 0;
     int out_len = 0;
 
     *ciphertext = malloc(plaintext_len + EVP_MAX_BLOCK_LENGTH);
@@ -556,7 +580,7 @@ int aes_decrypt_cbc(const uint8_t *key, const uint8_t *iv,
     if (!ctx)
         return 0;
 
-    int len = 0;
+    int len     = 0;
     int out_len = 0;
 
     *plaintext = malloc(ciphertext_len);
@@ -618,16 +642,16 @@ void rsa_encrypt_key(mpz_t ciphertext, const unsigned char *aes_key, rsa_context
     mpz_clear(m);
 }
 
-void rsa_decrypt(mpz_t m, const mpz_t c, rsa_context rsa)
+void rsa_decrypt(mpz_t m, const mpz_t c, rsa_context *rsa)
 {
-    mpz_powm(m, c, rsa.d, rsa.n);
+    mpz_powm(m, c, rsa->d, rsa->n);
 }
 
-void rsa_decrypt_key(unsigned char *aes_key_out, const mpz_t ciphertext, rsa_context rsa_key)
+void rsa_decrypt_key(unsigned char *aes_key_out, const mpz_t ciphertext, rsa_context *rsa)
 {
     mpz_t p;
     mpz_init(p);
-    rsa_decrypt(p, ciphertext, rsa_key);
+    rsa_decrypt(p, ciphertext, rsa);
 
     size_t count;
     mpz_export(aes_key_out, &count, 1, 1, 0, 0, p);
@@ -644,14 +668,40 @@ void rsa_decrypt_crt(mpz_t m, const mpz_t c, rsa_context rsa)
     mpz_powm(m, c, rsa.d, rsa.n);
 }
 
-void rsa_decrypt_key_crt(unsigned char *aes_key_out, const mpz_t ciphertext, rsa_context rsa_key)
+void rsa_decrypt_key_crt(unsigned char *aes_key_out, const mpz_t ciphertext, rsa_context *k)
 {
+    mpz_t m1, m2, h, t, m;
+    mpz_inits(m1, m2, h, t, m, NULL);
+
+    mpz_mod(m1, ciphertext, k->p);
+    mpz_powm(m1, m1, k->dp, k->p);
+    mpz_mod(m2, ciphertext, k->q);
+    mpz_powm(m2, m2, k->dq, k->q);
+
+    mpz_sub(t, m1, m2);
+    mpz_mod(t, t, k->p);
+    mpz_mul(h, k->qinv, t);
+    mpz_mod(h, h, k->p);
+
+    mpz_mul(t, h, k->q);
+    mpz_add(m, m2, t);
+
+    size_t count = 0;
+    mpz_export(aes_key_out, &count, 1, 1, 0, 0, m);
+
+    if (count < AES_KEY_SIZE)
+    {
+        memmove(aes_key_out + (AES_KEY_SIZE - count), aes_key_out, count);
+        memset(aes_key_out, 0, AES_KEY_SIZE - count);
+    }
+
+    mpz_clears(m1, m2, h, t, m, NULL);
 }
 
 int aes_encrypt_file(const char *in_filename, const char *out_filename,
                      const unsigned char *key, unsigned char *iv)
 {
-    FILE *infile = fopen(in_filename, "rb");
+    FILE *infile  = fopen(in_filename, "rb");
     FILE *outfile = fopen(out_filename, "wb");
     if (!infile || !outfile)
     {
@@ -685,7 +735,7 @@ int aes_encrypt_file(const char *in_filename, const char *out_filename,
 int aes_decrypt_file(const char *in_filename, const char *out_filename,
                      const unsigned char *key)
 {
-    FILE *infile = fopen(in_filename, "rb");
+    FILE *infile  = fopen(in_filename, "rb");
     FILE *outfile = fopen(out_filename, "wb");
     if (!infile || !outfile)
     {
@@ -719,7 +769,7 @@ int aes_decrypt_file(const char *in_filename, const char *out_filename,
 static void task_1(task_context *ctx)
 {
     printf("Task 1:\n");
-    rsa_key_gen(ctx->rsa_key.e, ctx->rsa_key.d, ctx->rsa_key.n, 2048);
+    rsa_key_gen(&ctx->rsa_key, 2048);
 
     bbs_state    bbs;
     mpz_t        p;
@@ -755,10 +805,10 @@ static void task_2(task_context *ctx)
         return;
     }
 
-    const char *message = "This is the plaintext message to be encrypted!";
+    const char *message       = "This is the plaintext message to be encrypted!";
     int         plaintext_len = (int)strlen(message);
 
-    uint8_t *ciphertext = NULL;
+    uint8_t *ciphertext     = NULL;
     int      ciphertext_len = 0;
 
     if (!aes_encrypt_cbc(ctx->aes_key, ctx->aes_iv, (const uint8_t *)message,
@@ -768,7 +818,7 @@ static void task_2(task_context *ctx)
         return;
     }
 
-    uint8_t *decrypted = NULL;
+    uint8_t *decrypted     = NULL;
     int      decrypted_len = 0;
 
     if (!aes_decrypt_cbc(ctx->aes_key, ctx->aes_iv, ciphertext, ciphertext_len,
@@ -779,7 +829,7 @@ static void task_2(task_context *ctx)
         return;
     }
 
-    decrypted = realloc(decrypted, (size_t)decrypted_len + 1);
+    decrypted                = realloc(decrypted, (size_t)decrypted_len + 1);
     decrypted[decrypted_len] = '\0';
 
     print_hex("AES-256 key: ", ctx->aes_key, sizeof(ctx->aes_key));
@@ -805,7 +855,7 @@ void task_3(task_context *ctx)
     gmp_printf("Encrypted AES key (RSA ciphertext): %Zx\n", cipher);
 
     unsigned char recovered_key[AES_KEY_SIZE];
-    rsa_decrypt_key(recovered_key, cipher, ctx->rsa_key);
+    rsa_decrypt_key(recovered_key, cipher, &ctx->rsa_key);
     print_hex("Decrypted AES-256 key: ", recovered_key, sizeof recovered_key);
 
     if (memcmp(ctx->aes_key, recovered_key, AES_KEY_SIZE) == 0)
@@ -837,17 +887,21 @@ void task_5(task_context *ctx)
     rsa_encrypt_key(cipher, ctx->aes_key, ctx->rsa_key);
 
     unsigned char recovered_key[AES_KEY_SIZE];
-    const int     N = 1000;
+    const int     N  = 1000;
     double        t0 = now_sec();
 
     for (int i = 0; i < N; i++)
-        rsa_decrypt_key(recovered_key, cipher, ctx->rsa_key);
+        rsa_decrypt_key(recovered_key, cipher, &ctx->rsa_key);
+
+    print_hex("Standard RSA decryption AES-256 key: ", recovered_key, sizeof(recovered_key));
 
     double t1 = now_sec();
     double t2 = now_sec();
 
     for (int i = 0; i < N; i++)
-        rsa_decrypt_key_crt(recovered_key, cipher, ctx->rsa_key);
+        rsa_decrypt_key_crt(recovered_key, cipher, &ctx->rsa_key);
+
+    print_hex("CRT decryption AES-256 key:          ", recovered_key, sizeof(recovered_key));
 
     double t3 = now_sec();
 
@@ -869,7 +923,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    mpz_inits(ctx->rsa_key.d, ctx->rsa_key.e, ctx->rsa_key.n, NULL);
+    rsa_key_init(&ctx->rsa_key);
     bbs_init(&ctx->bbs, 1024);
 
     task_1(ctx);
@@ -880,9 +934,10 @@ int main(int argc, char **argv)
 
     task_4(ctx);
 
+    rsa_crt_init(&ctx->rsa_key);
     task_5(ctx);
 
-    mpz_clears(ctx->rsa_key.d, ctx->rsa_key.e, ctx->rsa_key.n, NULL);
+    rsa_key_clear(&ctx->rsa_key);
     bbs_clear(&ctx->bbs);
     free(ctx);
 
